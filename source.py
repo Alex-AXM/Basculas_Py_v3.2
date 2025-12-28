@@ -1,1 +1,2539 @@
-import os import io import tkinter as tk import serial import time import re from collections import deque from datetime import datetime from escpos.printer import Serial import cv2 import threading from picamera2 import Picamera2 from google.oauth2 import service_account from googleapiclient.discovery import build from googleapiclient.http import MediaFileUpload # Configuración de la API de Google SCOPES = ['https://www.googleapis.com/auth/drive.file', 'https://www.googleapis.com/auth/spreadsheets'] CREDENTIALS_FILE = '/home/bascula1/Documents/CODIGOS/credentials.json' # Reemplaza con el nombre de tu archivo JSON de credenciales FOLDER_ID = '1lUbEczd6hDBA_hfgiIm4DLb5kiu4_YQ1' # Reemplaza con el ID de tu carpeta de Google Drive SPREADSHEET_ID = '1RkmBSIGTYa8rqYs8GGFzS_4__EDRUglod2MP_5ZnMuE' creds = service_account.Credentials.from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES) drive_service = build('drive', 'v3', credentials=creds) sheet_service = build('sheets', 'v4', credentials=creds) sheet = sheet_service.spreadsheets() class PapasElCampeonApp(tk.Tk): def __init__(self): super().__init__() self.title("Papas el Campeón Bascula 2") self.geometry("1440x1050") self.cart = [] self.current_user = "" self.sale_number = 0 self.video_recording = False self.video_thread = None self.photo_number = 1 self.serial_port = None self.connect_serial_port() self.label_date_time = tk.Label(self, text="", font=("Helvetica", 24)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=20, pady=20) self.label_instruction = tk.Label(self, text="Por favor seleccione vendedor", font=("Helvetica",36, "bold")) self.label_instruction.pack() self.frame_buttons = tk.Frame(self) self.frame_buttons.pack() self.create_user_button("HECTOR", self.login_user1, "lightblue", 0, 0) self.create_user_button("LALO", self.login_user2, "lightgreen", 0, 1) self.create_user_button("ROBERTO", self.login_user3, "lightcoral", 0, 2) self.create_user_button("AURELIO", self.login_user4, "lightgoldenrodyellow", 1, 0) self.create_user_button("SERGIO", self.login_user5, "lightcyan", 1, 1) self.create_user_button("OTRO", self.login_user6, "lightpink", 1, 2) self.update_datetime() self.start_cleanup_thread() def start_cleanup_thread(self): cleanup_thread = threading.Thread(target=self.cleanup_old_files) cleanup_thread.daemon = True cleanup_thread.start() def cleanup_old_files(self): while True: self.delete_old_files('/home/bascula1/Videos/', days=1) self.delete_old_files('/home/bascula1/.local/share/Trash/files/', days=1) time.sleep(86400) # Esperar 24 horas antes de la próxima limpieza def delete_old_files(self, directory, days): now = time.time() cutoff = now - (days * 86400) for root, dirs, files in os.walk(directory): for filename in files: file_path = os.path.join(root, filename) if os.path.isfile(file_path): file_mtime = os.path.getmtime(file_path) if file_mtime < cutoff: os.remove(file_path) #print(f"Deleted old file: {file_path}") def connect_serial_port(self): possible_ports = ['/dev/ttyACM0', '/dev/ttyACM1'] for port in possible_ports: try: self.serial_port = serial.Serial(port, 115200) #print(f"Connected to serial port: {port}") return except serial.SerialException as e: print(f"Error connecting to serial port {port}: {e}") self.serial_port = None print("Failed to connect to any serial port") def create_user_button(self, text, command, color, row, column): button = tk.Button(self.frame_buttons, text=text, font=("Helvetica", 36, "bold"), width=12, height=5, command=command, bg=color) button.grid(row=row, column=column, padx=10, pady=10) def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) def login_user1(self): self.current_user = "HECTOR" self.open_pin_entry_window("HECTOR") def login_user2(self): self.current_user = "LALO" self.open_pin_entry_window("LALO") def login_user3(self): self.current_user = "ROBERTO" self.open_pin_entry_window("ROBERTO") def login_user4(self): self.current_user = "AURELIO" self.open_pin_entry_window("AURELIO") def login_user5(self): self.current_user = "SERGIO" self.open_pin_entry_window("SERGIO") def login_user6(self): self.current_user = "OTRO" self.open_pin_entry_window("OTRO") def open_pin_entry_window(self, user): pin_entry_window = PinEntryWindow(self, user) def check_pin(self, user, pin, pin_window): correct_pin = self.get_correct_pin(user) if pin == correct_pin: threading.Thread(target=self.capture_and_upload_photo).start() self.start_video_recording() self.open_product_entry_window() pin_window.destroy() else: pin_window.show_error_message("PIN INCORRECTO POR FAVOR VERIFIQUE") def get_correct_pin(self, user): if user == "HECTOR": return "1363" elif user == "LALO": return "2542" elif user == "ROBERTO": return "3653" elif user == "AURELIO": return "4565" elif user == "SERGIO": return "6231" elif user == "OTRO": return "6545" def open_product_entry_window(self): product_entry_window = ProductEntryWindow(self) def open_size_selection_window(self, product_code): size_selection_window = SizeSelectionWindow(self, product_code) def open_trip_code_window(self, product_code, size): trip_code_window = TripCodeWindow(self, product_code, size) def open_price_per_kg_window(self, product_code, size, trip_code): price_per_kg_window = PricePerKgWindow(self, product_code, size, trip_code) def open_num_arpillas_window(self, product_code, size, trip_code, price_per_kg): num_arpillas_window = NumArpillasWindow(self, product_code, size, trip_code, price_per_kg) def open_weighing_stage_window(self, product_code, size, trip_code, price_per_kg, num_arpillas): weighing_stage_window = WeighingStageWindow(self, product_code, size, trip_code, price_per_kg, num_arpillas, self.serial_port) def add_to_cart(self, product_code, size, trip_code, weight, price_per_kg, num_arpillas): self.cart.append((product_code, size, trip_code, weight, price_per_kg, num_arpillas)) def show_checkout(self): product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart[0] checkout_window = CheckoutWindow(self, self.cart, product_code, size, trip_code, price_per_kg, num_arpillas) def increment_sale_number(self): self.sale_number += 1 return self.sale_number def reset_to_login(self): self.cart = [] self.current_user = "" self.label_instruction.config(text="Por favor seleccione vendedor") self.stop_video_recording() def start_video_recording(self): if not self.video_recording: self.video_recording = True self.video_thread = threading.Thread(target=self.record_video) self.video_thread.start() def stop_video_recording(self): self.video_recording = False if self.video_thread: self.video_thread.join() def record_video(self): video_capture = cv2.VideoCapture(0, cv2.CAP_V4L2) fourcc = cv2.VideoWriter_fourcc(*'mp4v') video_filename = f"/home/bascula1/Videos/{self.sale_number + 1}.mp4" out = cv2.VideoWriter(video_filename, fourcc, 20.0, (640, 480)) start_time = time.time() while self.video_recording and (time.time() - start_time) < 25: ret, frame = video_capture.read() if ret: out.write(frame) else: break video_capture.release() out.release() video_link = self.upload_to_drive(video_filename, 'video') self.update_spreadsheet_with_link(video_link, 'video') def capture_and_upload_photo(self): picam2 = Picamera2() picam2.start() time.sleep(1) # Esperar a que la cámara se inicialice photo_path = f"/home/bascula1/Videos/{self.photo_number}.jpg" picam2.capture_file(photo_path) picam2.close() photo_link = self.upload_to_drive(photo_path, 'photo') self.update_spreadsheet_with_link(photo_link, 'photo') self.photo_number += 1 def upload_to_drive(self, file_path, file_type): file_metadata = { 'name': os.path.basename(file_path), 'parents': [FOLDER_ID] } media = MediaFileUpload(file_path, mimetype='image/jpeg' if file_type == 'photo' else 'video/avi') file = drive_service.files().create(body=file_metadata, media_body=media, fields='id, webViewLink').execute() # Hacer el archivo público permission = { 'type': 'anyone', 'role': 'reader' } drive_service.permissions().create(fileId=file['id'], body=permission).execute() return file.get('webViewLink') def update_spreadsheet_with_link(self, link, link_type): # Obtener el número de fila correspondiente if link_type == 'video': # El enlace de video va en la misma fila que la venta actual row = self.sale_number + 1 range_ = f'BASCULA2!O{row}' elif link_type == 'photo': # El enlace de foto va una fila más abajo que la venta actual row = self.sale_number + 2 range_ = f'BASCULA2!P{row}' values = [[link]] body = { 'values': values } sheet.values().update(spreadsheetId=SPREADSHEET_ID, range=range_, valueInputOption='RAW', body=body).execute() def save_sale_data(self, data): range_ = f'BASCULA2!A{self.sale_number + 1}:N{self.sale_number + 1}' body = { 'values': data } sheet.values().update(spreadsheetId=SPREADSHEET_ID, range=range_, valueInputOption='RAW', body=body).execute() class PinEntryWindow(tk.Toplevel): def __init__(self, master, user): super().__init__(master) self.user = user self.master = master self.title(f"Ingresar clave para {self.user}") self.geometry("650x800") self.pin = "" # Centrando la ventana emergente self.update_idletasks() width = self.winfo_width() height = self.winfo_height() x = (self.winfo_screenwidth() // 2) - (width // 2) y = (self.winfo_screenheight() // 2) - (height // 2) self.geometry(f'{width}x{height}+{x}+{y}') self.label_pin = tk.Label(self, text="INGRESE CONTRASEÑA:", font=("Helvetica", 25, "bold")) self.label_pin.pack(pady=10) self.label_display = tk.Label(self, text="", font=("Helvetica", 25, "bold")) self.label_display.pack() self.error_message = tk.Label(self, text="", font=("Helvetica", 16), fg="red") self.error_message.pack(pady=5) self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=20) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "BORRAR"], ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: if key != "": button = tk.Button(key_frame, text=key, font=("Helvetica", 22, "bold"), width=7, height=3, command=lambda key=key: self.add_to_pin(key)) else: button = tk.Button(key_frame, text="", font=("Helvetica", 22), width=6, height=3, state=tk.DISABLED) button.pack(side=tk.LEFT, padx=5, pady=5) button_frame = tk.Frame(self) button_frame.pack(pady=10) cancel_button = tk.Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.cancel_pin_entry, bg="lightcoral", fg="black") cancel_button.pack(side=tk.LEFT, padx=5) accept_button = tk.Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.submit_pin, bg="lightgreen", fg="black") accept_button.pack(side=tk.LEFT, padx=5) self.protocol("WM_DELETE_WINDOW", self.cancel_pin_entry) self.bind("<KeyPress>", self.handle_keypress) def handle_keypress(self, event): key = event.keysym if key.isdigit(): self.add_to_pin(key) elif key == "BackSpace": self.add_to_pin("BORRAR") elif key == "Return": self.submit_pin() elif key == "Escape": self.cancel_pin_entry() def add_to_pin(self, char): if char == "BORRAR": self.pin = self.pin[:-1] elif len(self.pin) < 4: self.pin += char self.label_display.config(text="*" * len(self.pin)) def submit_pin(self, event=None): if len(self.pin) == 4: self.master.check_pin(self.user, self.pin, self) else: self.label_pin.config(text="Error por favor ingrese nuevamente", fg="red") self.pin = "" self.label_display.config(text="") def cancel_pin_entry(self, event=None): self.destroy() def show_error_message(self, message): self.error_message.config(text=message) self.pin = "" self.label_display.config(text="") class ProductEntryWindow(tk.Toplevel): def __init__(self, master): super().__init__(master) self.master = master self.title("Ingresar variedad de papa") self.geometry("1440x1050") self.product_code = "" self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="ELIJA LA VARIEDAD DE PAPA", font=("Helvetica", 32, "bold")) self.label_instruction.pack(pady=5) self.button_frame = tk.Frame(self) self.button_frame.pack(pady=10) self.create_product_button("FIANNAS", self.set_product_code_1, "lightgreen") self.create_product_button("ATLANTICS", self.set_product_code_2, "lightblue") self.create_product_button("ORQUESTAS", self.set_product_code_3, "lightcoral") def create_product_button(self, text, command, color): button = tk.Button(self.button_frame, text=text, font=("Helvetica", 38, "bold"), width=14, height=8, command=command, bg=color) button.pack(side=tk.LEFT, padx=10, pady=10) def set_product_code_1(self): self.master.open_size_selection_window("FIANNAS") self.destroy() def set_product_code_2(self): self.master.open_size_selection_window("ATLANTICS") self.destroy() def set_product_code_3(self): self.master.open_size_selection_window("ORQUESTAS") self.destroy() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class SizeSelectionWindow(tk.Toplevel): def __init__(self, master, product_code): super().__init__(master) self.master = master self.product_code = product_code self.title("Seleccionar Tamaño de Papa") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="SELECCIONE TAMAÑO DE PAPA", font=("Helvetica", 34, "bold")) self.label_instruction.pack(pady=20) self.size_frame = tk.Frame(self) self.size_frame.pack(pady=20) sizes = [("1era", "1"), ("2nda", "2"), ("3era", "3"), ("4ta", "4"), ("5ta", "5"), ("R", "R")] colors = ["lightblue", "lightgreen", "lightcoral", "lightgoldenrodyellow", "lightpink", "lightcyan"] for i, (size_text, size_value) in enumerate(sizes): button = tk.Button(self.size_frame, text=size_text, font=("Helvetica", 36, "bold"), width=10, height=4, bg=colors[i], command=lambda size_value=size_value: self.select_size(size_value)) button.grid(row=i//3, column=i%3, padx=10, pady=10) back_button = tk.Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.back_to_product_entry) back_button.pack(pady=20) def select_size(self, size): self.master.open_trip_code_window(self.product_code, size) self.destroy() def back_to_product_entry(self): self.destroy() self.master.open_product_entry_window() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class TripCodeWindow(tk.Toplevel): def __init__(self, master, product_code, size): super().__init__(master) self.master = master self.product_code = product_code self.size = size self.title("Ingresar Clave de Viaje") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="INGRESE CLAVE DE VIAJE ", font=("Helvetica", 30, "bold")) self.label_instruction.pack(pady=15) self.entry_trip_code = tk.Entry(self, font=("Helvetica", 30)) self.entry_trip_code.pack(pady=10) self.entry_trip_code.focus_set() self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=20) keys = [ ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "/"], ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "-"], ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Z", "."], ["X", "C", "V", "B", "N", "M"], ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: button = tk.Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=4, height=2, command=lambda key=key: self.add_to_entry(key), bg="darkgrey") button.pack(side=tk.LEFT, padx=5, pady=5) backspace_button = tk.Button(key_frame, text="BORRAR", font=("Helvetica", 24, "bold"), width=8, height=2, command=self.delete_last_char, bg="darkgrey") backspace_button.pack(side=tk.LEFT, padx=5, pady=5) space_button = tk.Button(key_frame, text="ESPACIO", font=("Helvetica", 24, "bold"), width=8, height=2, command=lambda: self.add_to_entry(" "), bg="darkgrey") space_button.pack(side=tk.LEFT, padx=5, pady=5) enter_button = tk.Button(key_frame, text="ENTER", font=("Helvetica", 30, "bold"), width=6, height=3, command=self.submit_trip_code, bg="lightgreen") enter_button.pack(side=tk.LEFT, padx=5, pady=5) back_button = tk.Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.back_to_size_selection) back_button.pack(pady=5) self.bind("<Return>", self.submit_trip_code) def add_to_entry(self, char): current_text = self.entry_trip_code.get() self.entry_trip_code.delete(0, tk.END) self.entry_trip_code.insert(tk.END, current_text + char) def delete_last_char(self): current_text = self.entry_trip_code.get() self.entry_trip_code.delete(len(current_text) - 1) def submit_trip_code(self, event=None): trip_code = self.entry_trip_code.get().strip() if trip_code: self.master.open_price_per_kg_window(self.product_code, self.size, trip_code) self.destroy() else: self.label_instruction.config(text="Por favor ingrese la clave de viaje", fg="red") def back_to_size_selection(self): self.destroy() self.master.open_size_selection_window(self.product_code) def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class PricePerKgWindow(tk.Toplevel): def __init__(self, master, product_code, size, trip_code): super().__init__(master) self.master = master self.product_code = product_code self.size = size self.trip_code = trip_code self.title("Ingresar Precio por Kilo") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="INGRESE EL PRECIO POR KILO ", font=("Helvetica", 36, "bold")) self.label_instruction.pack(pady=5) self.entry_price_per_kg = tk.Entry(self, font=("Helvetica", 32, "bold")) self.entry_price_per_kg.pack(pady=10) self.entry_price_per_kg.focus_set() self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=10) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".", "0", "BORRAR"], ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: button = tk.Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=6, height=2, command=lambda key=key: self.add_to_entry(key)) button.pack(side=tk.LEFT, padx=5, pady=5) button_frame = tk.Frame(self) button_frame.pack(pady=5) cancel_button = tk.Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=3, command=self.cancel_price_entry, bg="lightcoral", fg="black") cancel_button.pack(side=tk.LEFT, padx=5) accept_button = tk.Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=3, command=self.submit_price, bg="lightgreen", fg="black") accept_button.pack(side=tk.LEFT, padx=5) self.protocol("WM_DELETE_WINDOW", self.cancel_price_entry) self.bind("<KeyPress>", self.handle_keypress) def handle_keypress(self, event): key = event.keysym if key.isdigit() or key == "period": self.add_to_entry(key) elif key == "BackSpace": self.add_to_entry("BORRAR") elif key == "Return": self.submit_price() elif key == "Escape": self.cancel_price_entry() def add_to_entry(self, char): if char == "BORRAR": current_text = self.entry_price_per_kg.get() self.entry_price_per_kg.delete(len(current_text) - 1) elif len(char) == 1 or char == "period": current_text = self.entry_price_per_kg.get() self.entry_price_per_kg.delete(0, tk.END) self.entry_price_per_kg.insert(tk.END, current_text + ('.' if char == "period" else char)) def submit_price(self, event=None): price_per_kg = self.entry_price_per_kg.get().strip() if price_per_kg: self.master.open_num_arpillas_window(self.product_code, self.size, self.trip_code, float(price_per_kg)) self.destroy() else: self.label_instruction.config(text="Por favor ingrese el precio por kilo", fg="red") def cancel_price_entry(self, event=None): self.master.open_trip_code_window(self.product_code, self.size, self.trip_code) self.destroy() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class NumArpillasWindow(tk.Toplevel): def __init__(self, master, product_code, size, trip_code, price_per_kg): super().__init__(master) self.master = master self.product_code = product_code self.size = size self.trip_code = trip_code self.price_per_kg = price_per_kg self.title("Ingresar Número de Arpillas") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="INGRESE NUMERO DE ARPILLAS ", font=("Helvetica", 36, "bold")) self.label_instruction.pack(pady=10) self.entry_num_arpillas = tk.Entry(self, font=("Helvetica", 34)) self.entry_num_arpillas.pack(pady=10) self.entry_num_arpillas.focus_set() self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=20) keys = [ ["1", "2", "3", "1/4","1/5"], ["4", "5", "6", "1/2","1/10"], ["7", "8", "9", "3/4", "OTRO"], ["0", "BORRAR"] ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: button = tk.Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=6, height=2, command=lambda key=key: self.add_to_entry(key)) button.pack(side=tk.LEFT, padx=5, pady=5) button_frame = tk.Frame(self) button_frame.pack(pady=5) cancel_button = tk.Button(button_frame, text="CANCELAR", font=("Helvetica", 26, "bold"), width=9, height=3, command=self.cancel_num_arpillas_entry, bg="lightcoral", fg="black") cancel_button.pack(side=tk.LEFT, padx=5) accept_button = tk.Button(button_frame, text="ACEPTAR", font=("Helvetica", 26, "bold"), width=9, height=3, command=self.submit_num_arpillas, bg="lightgreen", fg="black") accept_button.pack(side=tk.LEFT, padx=5) self.protocol("WM_DELETE_WINDOW", self.cancel_num_arpillas_entry) self.bind("<KeyPress>", self.handle_keypress) def handle_keypress(self, event): key = event.keysym if key.isdigit(): self.add_to_entry(key) elif key == "BackSpace": self.add_to_entry("BORRAR") elif key == "Return": self.submit_num_arpillas() elif key == "Escape": self.cancel_num_arpillas_entry() def add_to_entry(self, char): current_text = self.entry_num_arpillas.get() if char == "BORRAR": self.entry_num_arpillas.delete(0, tk.END) self.entry_num_arpillas.insert(tk.END, current_text[:-1]) elif char in ["1/10","1/5","1/4", "1/2", "3/4"]: if current_text == "": if char == "1/4": self.entry_num_arpillas.insert(tk.END, "0.25") elif char == "1/2": self.entry_num_arpillas.insert(tk.END, "0.5") elif char == "3/4": self.entry_num_arpillas.insert(tk.END, "0.75") elif char == "1/10": self.entry_num_arpillas.insert(tk.END, "0.1") elif char == "1/5": self.entry_num_arpillas.insert(tk.END, "0.2") else: if char == "1/4": self.entry_num_arpillas.insert(tk.END, ".25") elif char == "1/2": self.entry_num_arpillas.insert(tk.END, ".5") elif char == "3/4": self.entry_num_arpillas.insert(tk.END, ".75") elif char == "1/10": self.entry_num_arpillas.insert(tk.END, ".1") elif char == "1/5": self.entry_num_arpillas.insert(tk.END, ".2") else: self.entry_num_arpillas.insert(tk.END, char) def submit_num_arpillas(self, event=None): num_arpillas = self.entry_num_arpillas.get().strip() if num_arpillas: self.master.open_weighing_stage_window(self.product_code, self.size, self.trip_code, self.price_per_kg, num_arpillas) self.destroy() else: self.label_instruction.config(text="POR FAVOR INGRESE NUMERO DE ARPILLAS", fg="red") def cancel_num_arpillas_entry(self, event=None): self.master.open_price_per_kg_window(self.product_code, self.size, self.trip_code) self.destroy() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class WeighingStageWindow(tk.Toplevel): def __init__(self, master, product_code, size, trip_code, price_per_kg, num_arpillas, serial_port): super().__init__(master) self.master = master self.product_code = product_code self.size = size self.trip_code = trip_code self.price_per_kg = price_per_kg self.num_arpillas = num_arpillas self.serial_port = serial_port self.current_weight = 0 # Inicializamos current_weight self.title("Etapa de Pesaje") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 20)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text=f"COLOQUE EN LA BASCULA PAPAS {self.product_code} A PESAR", font=("Helvetica", 32, "bold")) self.label_instruction.pack(pady=20) self.label_price = tk.Label(self, text=f"PRECIO POR KILO: ${self.price_per_kg:.2f}", font=("Helvetica", 30, "bold")) self.label_price.pack(pady=20) self.label_weight = tk.Label(self, text="PESO: 0.00 kg", font=("Helvetica", 30)) self.label_weight.pack(pady=20) self.label_total_price = tk.Label(self, text="PRECIO TOTAL: $0.00", font=("Helvetica", 30)) self.label_total_price.pack(pady=10) # Botones Volver y Aceptar self.button_frame = tk.Frame(self) self.button_frame.pack(pady=10) self.button_back = tk.Button(self.button_frame, text="VOLVER", font=("Helvetica", 32, "bold"),width=20, height=10, bg="lightcoral", command=self.back_to_product_entry) self.button_back.pack(side=tk.LEFT, padx=10) self.button_accept = tk.Button(self.button_frame, text="ACEPTAR", font=("Helvetica", 32, "bold"),width=20, height=10, bg="lightgreen", command=self.finish_purchase) self.button_accept.pack(side=tk.LEFT, padx=10) self.add_another_frame = tk.Frame(self) self.add_another_frame.pack_forget() # Oculta el frame inicialmente self.start_weighing() def back_to_product_entry(self): self.destroy() self.master.open_product_entry_window() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) def start_weighing(self): self.read_weight() def read_weight(self): if self.serial_port is not None: self.serial_port.write(b'P') # Enviar el carácter 'P' a la báscula time.sleep(0.1) # Pequeña pausa para esperar la respuesta # Se lee todo lo disponible en el buffer del puerto serie weight_data = self.serial_port.read(self.serial_port.in_waiting).decode('utf-8').strip() # Filtra y procesa cada número flotante encontrado weights = re.findall(r'\d+\.\d+', weight_data) if weights: try: # Toma el último peso válido recibido self.current_weight = float(weights[-1]) self.label_weight.config(text=f"PESO: {self.current_weight:.1f} kg") self.label_total_price.config(text=f"PRECIO TOTAL: ${self.current_weight * self.price_per_kg:.2f}") except ValueError: pass # Si no es un número, no actualiza nada self.after(20, self.read_weight) # Repetir el proceso cada 50 ms def ask_add_another_product(self): self.add_another_frame = tk.Frame(self) self.add_another_frame.pack(pady=20) self.button_no = tk.Button(self.add_another_frame, text="CONTINUAR", font=("Helvetica", 36, "bold"), bg="lightgreen", command=self.finish_purchase, width=16, height=4) self.button_no.pack(side=tk.LEFT, padx=20) def finish_purchase(self): self.master.add_to_cart(self.product_code, self.size, self.trip_code, self.current_weight, self.price_per_kg, self.num_arpillas) self.add_another_frame.destroy() self.destroy() self.master.show_checkout() class CheckoutWindow(tk.Toplevel): def __init__(self, master, cart, product_code, size, trip_code, price_per_kg, num_arpillas): super().__init__(master) self.master = master self.title("Resumen de Compra") self.geometry("1440x1050") self.cart = cart[0] # Solo un producto en el carrito self.payment_method = "" self.current_ticket = 1 self.sale_number = master.increment_sale_number() self.product_code = product_code self.size = size self.trip_code = trip_code self.price_per_kg = price_per_kg self.num_arpillas = num_arpillas self.label_date_time = tk.Label(self, text="", font=("Helvetica", 20)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_title = tk.Label(self, text="RESUMEN DE LA COMPRA", font=("Helvetica", 36, "bold")) self.label_title.pack(pady=20) product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart subtotal = weight * price_per_kg self.total_price = subtotal self.label_details = tk.Label( self, text=f"Producto: {product_code}\nTamaño: {size}\nClave de viaje: {trip_code}\nPeso: {weight:.1f} kg\nPrecio por kg: ${price_per_kg:.2f}\nNúmero de arpillas: {num_arpillas}\nSubtotal: ${subtotal:.2f}", font=("Helvetica", 26) ) self.label_details.pack(pady=20) self.label_total = tk.Label(self, text=f"TOTAL A PAGAR: ${self.total_price:.2f}", font=("Helvetica", 32, "bold")) self.label_total.pack(pady=10) self.button_frame = tk.Frame(self) self.button_frame.pack(pady=10) back_button = tk.Button(self.button_frame, text="VOLVER", font=("Helvetica", 34, "bold"),width=10,height=4, bg="lightblue", command=self.back_to_weighing) back_button.pack(side=tk.LEFT, padx=10) cancel_button = tk.Button(self.button_frame, text="CANCELAR", font=("Helvetica", 34, "bold"),width=10,height=4, bg="lightcoral", command=self.cancel_purchase) cancel_button.pack(side=tk.LEFT, padx=10) cash_button = tk.Button(self.button_frame, text="EFECTIVO", font=("Helvetica", 34, "bold"), bg="lightgreen",width=10,height=4, command=lambda: self.set_payment_method("Efectivo")) cash_button.pack(side=tk.LEFT, padx=10) credit_button = tk.Button(self.button_frame, text="FIADO", font=("Helvetica", 34, "bold"), bg="lightyellow",width=10,height=4, command=lambda: self.open_client_name_window()) credit_button.pack(side=tk.LEFT, padx=10) def back_to_weighing(self): self.destroy() self.master.open_weighing_stage_window(self.product_code, self.size, self.trip_code, self.price_per_kg, self.num_arpillas) def set_payment_method(self, method): self.payment_method = method self.label_total.config(text=f"Total de la Compra: ${self.total_price:.2f}\nMétodo de pago: {self.payment_method}") self.button_frame.pack_forget() self.print_button = tk.Button(self, text="IMPRIMIR TICKET CLIENTE", font=("Helvetica", 40, "bold"), width=25, height=3, bg="lightgreen", command=self.print_ticket) self.print_button.pack(pady=20) def open_client_name_window(self): self.client_name_window = ClientNameWindow(self) def set_client_name(self, client_name): self.client_name = client_name self.client_name_window.destroy() self.set_payment_method("Fiado") def print_ticket(self): current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S") seller = self.master.current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.00, dsrdtr=True) p.text("-------------------------------\n") p.text("-------------------------------\n") p.set(align="center", width=2, height=2, density=3) p.text(" Papas El Campeon \n") p.set(align="left", width=1, height=1, density=2) p.text(f" Fecha: {current_time}\n") p.text(f"Folio: {self.sale_number}\n") p.text("-------------------------------\n") p.text("Peso(kg) Subtotal\n") p.text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart subtotal = weight * price_per_kg p.text(f"{weight:.1f} ${subtotal:.2f}\n") p.text("-------------------------------\n") p.text(f"Total: ${self.total_price:.2f}\n") p.text("-------------------------------\n") p.text("Gracias por su compra\nVuelva pronto\n") p.cut() if self.current_ticket == 1: self.current_ticket += 1 self.print_button.config(text="TICKET VENDEDOR", command=self.print_seller_ticket) else: self.print_button.config(state=tk.DISABLED) self.show_new_sale_prompt() def print_seller_ticket(self): current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S") seller = self.master.current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.00, dsrdtr=True) p.text("-------------------------------\n") p.text("-------------------------------\n") p.set(align="center", width=2, height=2, density=3) p.text(" Papas El Campeon \n") p.set(align="left", width=1, height=1, density=2) p.text(f" Fecha: {current_time}\n") p.text(f"Folio: {self.sale_number}\n") p.text(f"Vendedor: {seller}\n") if hasattr(self, 'client_name'): p.text("FIADO\n") p.text(f"Cliente: {self.client_name}\n") p.text("-------------------------------\n") p.text("Producto-T NA CV P kg Subtotal\n") p.text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart subtotal = weight * price_per_kg p.text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.1f}kg\n") p.text(f"${subtotal:.2f}\n") p.text("-------------------------------\n") p.text(f"Total: ${self.total_price:.2f}\n") p.text("-------------------------------\n") p.text("Entregue ticket a contabilidad.\n") qr_content = f"{seller}\n{self.total_price:.2f}" p.qr(qr_content, size=8) p.text("-------------------------------\n") p.cut() self.master.stop_video_recording() # Detener grabación después de imprimir el ticket de vendedor self.save_sale_data_to_spreadsheet("NO") def cancel_purchase(self): CancelPinEntryWindow(self) def cancel_purchase_confirmed(self): current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S") seller = self.master.current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.00, dsrdtr=True) p.text("-------------------------------\n") p.text("-------------------------------\n") p.set(align="center", width=2, height=2, density=3) p.text(" Papas El Campeon \n") p.set(align="left", width=1, height=1, density=2) p.text(f" Fecha: {current_time}\n") p.text(f"Folio: {self.sale_number}\n") p.text(f"Vendedor: {seller}\n") p.text("-------------------------------\n") p.text("Producto-T NA CV P kg Subtotal\n") p.text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart subtotal = weight * price_per_kg p.text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.1f}kg\n") p.text(f"${subtotal:.2f}\n") p.text("-------------------------------\n") p.text(f"Total: ${self.total_price:.2f}\n") p.text("-------------------------------\n") p.text("La compra fue cancelada\n") p.text("-------------------------------\n") p.cut() self.master.stop_video_recording() # Detener grabación después de imprimir el ticket de venta cancelada self.save_sale_data_to_spreadsheet("SI") def save_sale_data_to_spreadsheet(self, cancelado): product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.cart subtotal = weight * price_per_kg sale_data = [[ self.sale_number, # NUMERO DE VENTA (O FOLIO) datetime.now().strftime("%d/%m/%Y"), # FECHA datetime.now().strftime("%H:%M:%S"), # HORA self.master.current_user, # VENDEDOR product_code, # CLAVE DE PRODUCTO size, # TAMAÑO num_arpillas, # NUMERO DE ARPILLAS trip_code, # CLAVE DE VIAJE weight, # PESO EN KG price_per_kg, # PRECIO POR KILO subtotal, # COSTO SUBTOTAL "SI" if hasattr(self, 'client_name') else "NO", # ¿FIADO? self.client_name if hasattr(self, 'client_name') else "N/A", # NOMBRE DE CLIENTE cancelado # ¿CANCELADO? ]] self.master.save_sale_data(sale_data) self.show_new_sale_prompt() def show_new_sale_prompt(self): NewSalePromptWindow(self.master, self) def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class CancelPinEntryWindow(tk.Toplevel): def __init__(self, master): super().__init__(master) self.master = master self.title("Ingrese PIN de Cancelación") self.geometry("650x800") self.pin = "" # Centrando la ventana emergente self.update_idletasks() width = self.winfo_width() height = self.winfo_height() x = (self.winfo_screenwidth() // 2) - (width // 2) y = (self.winfo_screenheight() // 2) - (height // 2) self.geometry(f'{width}x{height}+{x}+{y}') self.label_pin = tk.Label(self, text="INGRESE PIN DE CANCELACIÓN:", font=("Helvetica", 25, "bold")) self.label_pin.pack(pady=10) self.label_display = tk.Label(self, text="", font=("Helvetica", 25, "bold")) self.label_display.pack() self.error_message = tk.Label(self, text="", font=("Helvetica", 16), fg="red") self.error_message.pack(pady=5) self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=20) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "BORRAR"], ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: if key != "": button = tk.Button(key_frame, text=key, font=("Helvetica", 22, "bold"), width=7, height=3, command=lambda key=key: self.add_to_pin(key)) else: button = tk.Button(key_frame, text="", font=("Helvetica", 22), width=6, height=3, state=tk.DISABLED) button.pack(side=tk.LEFT, padx=5, pady=5) button_frame = tk.Frame(self) button_frame.pack(pady=10) cancel_button = tk.Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.cancel_pin_entry, bg="lightcoral", fg="black") cancel_button.pack(side=tk.LEFT, padx=5) accept_button = tk.Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.submit_pin, bg="lightgreen", fg="black") accept_button.pack(side=tk.LEFT, padx=5) self.protocol("WM_DELETE_WINDOW", self.cancel_pin_entry) self.bind("<KeyPress>", self.handle_keypress) def handle_keypress(self, event): key = event.keysym if key.isdigit(): self.add_to_pin(key) elif key == "BackSpace": self.add_to_pin("BORRAR") elif key == "Return": self.submit_pin() elif key == "Escape": self.cancel_pin_entry() def add_to_pin(self, char): if char == "BORRAR": self.pin = self.pin[:-1] elif len(self.pin) < 6: self.pin += char self.label_display.config(text="*" * len(self.pin)) def submit_pin(self, event=None): if self.pin == "083145": self.master.cancel_purchase_confirmed() self.destroy() else: self.error_message.config(text="PIN INCORRECTO. INTENTE DE NUEVO.") self.pin = "" self.label_display.config(text="") def cancel_pin_entry(self, event=None): self.destroy() class ClientNameWindow(tk.Toplevel): def __init__(self, master): super().__init__(master) self.master = master self.title("Nombre de Cliente") self.geometry("1440x1050") self.label_date_time = tk.Label(self, text="", font=("Helvetica", 22)) self.label_date_time.pack(side=tk.TOP, anchor=tk.NW, padx=10, pady=10) self.update_datetime() self.label_instruction = tk.Label(self, text="INGRESE NOMBRE DE CLIENTE ", font=("Helvetica", 32, "bold")) self.label_instruction.pack(pady=10) self.entry_client_name = tk.Entry(self, font=("Helvetica", 30)) self.entry_client_name.pack(pady=10) self.entry_client_name.focus_set() self.keyboard_frame = tk.Frame(self) self.keyboard_frame.pack(pady=10) keys = [ ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "/"], ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "-"], ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Z", "."], ["X", "C", "V", "B", "N", "M"], ] for row in keys: key_frame = tk.Frame(self.keyboard_frame) key_frame.pack() for key in row: button = tk.Button(key_frame, text=key, font=("Helvetica", 24, "bold"), width=4, height=2, command=lambda key=key: self.add_to_entry(key), bg="darkgrey") button.pack(side=tk.LEFT, padx=5, pady=5) backspace_button = tk.Button(key_frame, text="BORRAR", font=("Helvetica", 24, "bold"), width=6, height=2, command=self.delete_last_char, bg="darkgrey") backspace_button.pack(side=tk.LEFT, padx=5, pady=5) space_button = tk.Button(key_frame, text="ESPACIO", font=("Helvetica", 24, "bold"), width=6, height=2, command=lambda: self.add_to_entry(" "), bg="darkgrey") space_button.pack(side=tk.LEFT, padx=5, pady=5) enter_button = tk.Button(key_frame, text="ENTER", font=("Helvetica", 30, "bold"), width=8, height=3, command=self.submit_client_name, bg="lightgreen") enter_button.pack(side=tk.LEFT, padx=5, pady=5) back_button = tk.Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.back_to_checkout) back_button.pack(pady=5) self.bind("<Return>", self.submit_client_name) def add_to_entry(self, char): current_text = self.entry_client_name.get() self.entry_client_name.delete(0, tk.END) self.entry_client_name.insert(tk.END, current_text + char) def delete_last_char(self): current_text = self.entry_client_name.get() self.entry_client_name.delete(len(current_text) - 1) def submit_client_name(self, event=None): client_name = self.entry_client_name.get().strip() if client_name: self.master.set_client_name(client_name) else: self.label_instruction.config(text="Por favor ingrese el nombre del cliente", fg="red") def back_to_checkout(self): self.destroy() def update_datetime(self): now = datetime.now() formatted_date_time = now.strftime("%d/%m/%Y %I:%M:%S %p") self.label_date_time.config(text=formatted_date_time) self.after(1000, self.update_datetime) class NewSalePromptWindow(tk.Toplevel): def __init__(self, master, checkout_window, weighing_window=None): super().__init__(master) self.master = master self.checkout_window = checkout_window self.weighing_window = weighing_window # Añadir referencia de la ventana de "Etapa de Pesaje" self.title("¿Nueva venta?") self.geometry("1440x1050") self.master.stop_video_recording() self.label_question = tk.Label(self, text="¿DESEA INICIAR UNA NUEVA VENTA?", font=("Helvetica", 40, "bold")) self.label_question.pack(pady=20) self.label_reticket = tk.Label(self, text="EN CASO DE ATASCO DE PAPEL ABRA LA IMPRESORA \n COLOQUE BIEN EL PAPEL Y REIMPRIMA TICKETS\n", font=("Helvetica", 34, "bold")) self.label_reticket.pack(pady=20) self.new_sale_frame = tk.Frame(self) self.new_sale_frame.pack(pady=40) self.button_reprint_tickets = tk.Button(self.new_sale_frame, text="REIMPRIMIR", font=("Helvetica", 46, "bold"), width=20, height=10, bg="lightblue", command=self.reprint_tickets) self.button_reprint_tickets.pack(side=tk.LEFT, padx=20) self.button_new_sale_yes = tk.Button(self.new_sale_frame, text="NUEVA VENTA", font=("Helvetica", 46, "bold"),width=20, height=10, bg="lightgreen", command=self.new_sale_yes) self.button_new_sale_yes.pack(side=tk.LEFT, padx=20) def new_sale_yes(self): self.master.cart = [] # Limpiar el resumen de compra self.checkout_window.destroy() self.destroy() self.master.reset_to_login() def reprint_tickets(self): current_time = datetime.now().strftime("%d/%m/%Y %H:%M:%S") seller = self.master.current_user # Obteniendo los datos del carrito desde la instancia principal cart = self.master.cart if not cart: print("Error: Carrito vacío.") return product_code, size, trip_code, weight, price_per_kg, num_arpillas = cart[0] subtotal = weight * price_per_kg total_price = subtotal p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.00, dsrdtr=True) # Ticket de Cliente p.text("-------------------------------\n") p.text("-------------------------------\n") p.set(align="center", width=2, height=2, density=3) p.text(" Papas El Campeon \n") p.set(align="left", width=1, height=1, density=2) p.text(f" Fecha: {current_time}\n") p.text(f"Folio: {self.master.sale_number}\n") p.text("-------------------------------\n") p.text("Peso(kg) Subtotal\n") p.text("-------------------------------\n") p.text(f"{weight:.1f} ${subtotal:.2f}\n") p.text("-------------------------------\n") p.text(f"Total: ${total_price:.2f}\n") p.text("-------------------------------\n") p.text("Gracias por su compra\nVuelva pronto\n") p.cut() time.sleep(3) # Ticket de Vendedor p.text("-------------------------------\n") p.text("-------------------------------\n") p.set(align="center", width=2, height=2, density=3) p.text(" Papas El Campeon \n") p.text(" COPIA DE TICKET VENDEDOR \n") p.text(" Hubo atasco de papel\n") p.set(align="left", width=1, height=1, density=2) p.text(f" Fecha: {current_time}\n") p.text(f"Folio: {self.master.sale_number}\n") p.text(f"Vendedor: {seller}\n") if hasattr(self.master, 'client_name'): p.text("FIADO\n") p.text(f"Cliente: {self.master.client_name}\n") p.text("-------------------------------\n") p.text("Producto-T NA CV P kg Subtotal\n") p.text("-------------------------------\n") p.text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.1f}kg\n") p.text(f"${subtotal:.2f}\n") p.text("-------------------------------\n") p.text(f"Total: ${total_price:.2f}\n") p.text("-------------------------------\n") p.text("Entregue ticket a contabilidad.\n") qr_content = f"{seller}\n{total_price:.2f}" p.qr(qr_content, size=8) p.text("-------------------------------\n") p.cut() # Cerrar ventana de "Etapa de Pesaje" if self.weighing_window is not None: self.weighing_window.destroy() self.master.cart = [] # Limpiar el resumen de compra self.checkout_window.destroy() self.destroy() self.master.reset_to_login() if __name__ == "__main__": app = PapasElCampeonApp() app.mainloop()
+import os import io import tkinter as tk import serial import time import re from collections import deque from datetime import datetime from escpos.
+
+printer import Serial import cv2 import threading from picamera2 import Picamera2 from google.
+
+oauth2 import service_account from googleapiclient.
+
+discovery import build from googleapiclient.
+
+http import MediaFileUpload # Configuración de la API de Google SCOPES = ['https://www.
+
+googleapis.
+
+com/auth/drive.
+
+file', 'https://www.
+
+googleapis.
+
+com/auth/spreadsheets'] CREDENTIALS_FILE = '/home/bascula1/Documents/CODIGOS/credentials.
+
+json' # Reemplaza con el nombre de tu archivo JSON de credenciales FOLDER_ID = '1lUbEczd6hDBA_hfgiIm4DLb5kiu4_YQ1' # Reemplaza con el ID de tu carpeta de Google Drive SPREADSHEET_ID = '1RkmBSIGTYa8rqYs8GGFzS_4__EDRUglod2MP_5ZnMuE' creds = service_account.
+
+Credentials.
+
+from_service_account_file(CREDENTIALS_FILE, scopes=SCOPES) drive_service = build('drive', 'v3', credentials=creds) sheet_service = build('sheets', 'v4', credentials=creds) sheet = sheet_service.
+
+spreadsheets() class PapasElCampeonApp(tk.
+
+Tk): def __init__(self): super().
+
+__init__() self.
+
+title("Papas el Campeón Bascula 2") self.
+
+geometry("1440x1050") self.
+
+cart = [] self.
+
+current_user = "" self.
+
+sale_number = 0 self.
+
+video_recording = False self.
+
+video_thread = None self.
+
+photo_number = 1 self.
+
+serial_port = None self.
+
+connect_serial_port() self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 24)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=20, pady=20) self.
+
+label_instruction = tk.
+
+Label(self, text="Por favor seleccione vendedor", font=("Helvetica",36, "bold")) self.
+
+label_instruction.
+
+pack() self.
+
+frame_buttons = tk.
+
+Frame(self) self.
+
+frame_buttons.
+
+pack() self.
+
+create_user_button("HECTOR", self.
+
+login_user1, "lightblue", 0, 0) self.
+
+create_user_button("LALO", self.
+
+login_user2, "lightgreen", 0, 1) self.
+
+create_user_button("ROBERTO", self.
+
+login_user3, "lightcoral", 0, 2) self.
+
+create_user_button("AURELIO", self.
+
+login_user4, "lightgoldenrodyellow", 1, 0) self.
+
+create_user_button("SERGIO", self.
+
+login_user5, "lightcyan", 1, 1) self.
+
+create_user_button("OTRO", self.
+
+login_user6, "lightpink", 1, 2) self.
+
+update_datetime() self.
+
+start_cleanup_thread() def start_cleanup_thread(self): cleanup_thread = threading.
+
+Thread(target=self.
+
+cleanup_old_files) cleanup_thread.
+
+daemon = True cleanup_thread.
+
+start() def cleanup_old_files(self): while True: self.
+
+delete_old_files('/home/bascula1/Videos/', days=1) self.
+
+delete_old_files('/home/bascula1/.
+
+local/share/Trash/files/', days=1) time.
+
+sleep(86400) # Esperar 24 horas antes de la próxima limpieza def delete_old_files(self, directory, days): now = time.
+
+time() cutoff = now - (days * 86400) for root, dirs, files in os.
+
+walk(directory): for filename in files: file_path = os.
+
+path.
+
+join(root, filename) if os.
+
+path.
+
+isfile(file_path): file_mtime = os.
+
+path.
+
+getmtime(file_path) if file_mtime < cutoff: os.
+
+remove(file_path) #print(f"Deleted old file: {file_path}") def connect_serial_port(self): possible_ports = ['/dev/ttyACM0', '/dev/ttyACM1'] for port in possible_ports: try: self.
+
+serial_port = serial.
+
+Serial(port, 115200) #print(f"Connected to serial port: {port}") return except serial.
+
+SerialException as e: print(f"Error connecting to serial port {port}: {e}") self.
+
+serial_port = None print("Failed to connect to any serial port") def create_user_button(self, text, command, color, row, column): button = tk.
+
+Button(self.
+
+frame_buttons, text=text, font=("Helvetica", 36, "bold"), width=12, height=5, command=command, bg=color) button.
+
+grid(row=row, column=column, padx=10, pady=10) def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) def login_user1(self): self.
+
+current_user = "HECTOR" self.
+
+open_pin_entry_window("HECTOR") def login_user2(self): self.
+
+current_user = "LALO" self.
+
+open_pin_entry_window("LALO") def login_user3(self): self.
+
+current_user = "ROBERTO" self.
+
+open_pin_entry_window("ROBERTO") def login_user4(self): self.
+
+current_user = "AURELIO" self.
+
+open_pin_entry_window("AURELIO") def login_user5(self): self.
+
+current_user = "SERGIO" self.
+
+open_pin_entry_window("SERGIO") def login_user6(self): self.
+
+current_user = "OTRO" self.
+
+open_pin_entry_window("OTRO") def open_pin_entry_window(self, user): pin_entry_window = PinEntryWindow(self, user) def check_pin(self, user, pin, pin_window): correct_pin = self.
+
+get_correct_pin(user) if pin == correct_pin: threading.
+
+Thread(target=self.
+
+capture_and_upload_photo).
+
+start() self.
+
+start_video_recording() self.
+
+open_product_entry_window() pin_window.
+
+destroy() else: pin_window.
+
+show_error_message("PIN INCORRECTO POR FAVOR VERIFIQUE") def get_correct_pin(self, user): if user == "HECTOR": return "1363" elif user == "LALO": return "2542" elif user == "ROBERTO": return "3653" elif user == "AURELIO": return "4565" elif user == "SERGIO": return "6231" elif user == "OTRO": return "6545" def open_product_entry_window(self): product_entry_window = ProductEntryWindow(self) def open_size_selection_window(self, product_code): size_selection_window = SizeSelectionWindow(self, product_code) def open_trip_code_window(self, product_code, size): trip_code_window = TripCodeWindow(self, product_code, size) def open_price_per_kg_window(self, product_code, size, trip_code): price_per_kg_window = PricePerKgWindow(self, product_code, size, trip_code) def open_num_arpillas_window(self, product_code, size, trip_code, price_per_kg): num_arpillas_window = NumArpillasWindow(self, product_code, size, trip_code, price_per_kg) def open_weighing_stage_window(self, product_code, size, trip_code, price_per_kg, num_arpillas): weighing_stage_window = WeighingStageWindow(self, product_code, size, trip_code, price_per_kg, num_arpillas, self.
+
+serial_port) def add_to_cart(self, product_code, size, trip_code, weight, price_per_kg, num_arpillas): self.
+
+cart.
+
+append((product_code, size, trip_code, weight, price_per_kg, num_arpillas)) def show_checkout(self): product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart[0] checkout_window = CheckoutWindow(self, self.
+
+cart, product_code, size, trip_code, price_per_kg, num_arpillas) def increment_sale_number(self): self.
+
+sale_number += 1 return self.
+
+sale_number def reset_to_login(self): self.
+
+cart = [] self.
+
+current_user = "" self.
+
+label_instruction.
+
+config(text="Por favor seleccione vendedor") self.
+
+stop_video_recording() def start_video_recording(self): if not self.
+
+video_recording: self.
+
+video_recording = True self.
+
+video_thread = threading.
+
+Thread(target=self.
+
+record_video) self.
+
+video_thread.
+
+start() def stop_video_recording(self): self.
+
+video_recording = False if self.
+
+video_thread: self.
+
+video_thread.
+
+join() def record_video(self): video_capture = cv2.
+
+VideoCapture(0, cv2.
+
+CAP_V4L2) fourcc = cv2.
+
+VideoWriter_fourcc(*'mp4v') video_filename = f"/home/bascula1/Videos/{self.
+
+sale_number + 1}.
+
+mp4" out = cv2.
+
+VideoWriter(video_filename, fourcc, 20.
+
+0, (640, 480)) start_time = time.
+
+time() while self.
+
+video_recording and (time.
+
+time() - start_time) < 25: ret, frame = video_capture.
+
+read() if ret: out.
+
+write(frame) else: break video_capture.
+
+release() out.
+
+release() video_link = self.
+
+upload_to_drive(video_filename, 'video') self.
+
+update_spreadsheet_with_link(video_link, 'video') def capture_and_upload_photo(self): picam2 = Picamera2() picam2.
+
+start() time.
+
+sleep(1) # Esperar a que la cámara se inicialice photo_path = f"/home/bascula1/Videos/{self.
+
+photo_number}.
+
+jpg" picam2.
+
+capture_file(photo_path) picam2.
+
+close() photo_link = self.
+
+upload_to_drive(photo_path, 'photo') self.
+
+update_spreadsheet_with_link(photo_link, 'photo') self.
+
+photo_number += 1 def upload_to_drive(self, file_path, file_type): file_metadata = { 'name': os.
+
+path.
+
+basename(file_path), 'parents': [FOLDER_ID] } media = MediaFileUpload(file_path, mimetype='image/jpeg' if file_type == 'photo' else 'video/avi') file = drive_service.
+
+files().
+
+create(body=file_metadata, media_body=media, fields='id, webViewLink').
+
+execute() # Hacer el archivo público permission = { 'type': 'anyone', 'role': 'reader' } drive_service.
+
+permissions().
+
+create(fileId=file['id'], body=permission).
+
+execute() return file.
+
+get('webViewLink') def update_spreadsheet_with_link(self, link, link_type): # Obtener el número de fila correspondiente if link_type == 'video': # El enlace de video va en la misma fila que la venta actual row = self.
+
+sale_number + 1 range_ = f'BASCULA2!
+
+O{row}' elif link_type == 'photo': # El enlace de foto va una fila más abajo que la venta actual row = self.
+
+sale_number + 2 range_ = f'BASCULA2!
+
+P{row}' values = [[link]] body = { 'values': values } sheet.
+
+values().
+
+update(spreadsheetId=SPREADSHEET_ID, range=range_, valueInputOption='RAW', body=body).
+
+execute() def save_sale_data(self, data): range_ = f'BASCULA2!
+
+A{self.
+
+sale_number + 1}:N{self.
+
+sale_number + 1}' body = { 'values': data } sheet.
+
+values().
+
+update(spreadsheetId=SPREADSHEET_ID, range=range_, valueInputOption='RAW', body=body).
+
+execute() class PinEntryWindow(tk.
+
+Toplevel): def __init__(self, master, user): super().
+
+__init__(master) self.
+
+user = user self.
+
+master = master self.
+
+title(f"Ingresar clave para {self.
+
+user}") self.
+
+geometry("650x800") self.
+
+pin = "" # Centrando la ventana emergente self.
+
+update_idletasks() width = self.
+
+winfo_width() height = self.
+
+winfo_height() x = (self.
+
+winfo_screenwidth() // 2) - (width // 2) y = (self.
+
+winfo_screenheight() // 2) - (height // 2) self.
+
+geometry(f'{width}x{height}+{x}+{y}') self.
+
+label_pin = tk.
+
+Label(self, text="INGRESE CONTRASEÑA:", font=("Helvetica", 25, "bold")) self.
+
+label_pin.
+
+pack(pady=10) self.
+
+label_display = tk.
+
+Label(self, text="", font=("Helvetica", 25, "bold")) self.
+
+label_display.
+
+pack() self.
+
+error_message = tk.
+
+Label(self, text="", font=("Helvetica", 16), fg="red") self.
+
+error_message.
+
+pack(pady=5) self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=20) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "BORRAR"], ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: if key !
+
+= "": button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 22, "bold"), width=7, height=3, command=lambda key=key: self.
+
+add_to_pin(key)) else: button = tk.
+
+Button(key_frame, text="", font=("Helvetica", 22), width=6, height=3, state=tk.
+
+DISABLED) button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) button_frame = tk.
+
+Frame(self) button_frame.
+
+pack(pady=10) cancel_button = tk.
+
+Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.
+
+cancel_pin_entry, bg="lightcoral", fg="black") cancel_button.
+
+pack(side=tk.
+
+LEFT, padx=5) accept_button = tk.
+
+Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.
+
+submit_pin, bg="lightgreen", fg="black") accept_button.
+
+pack(side=tk.
+
+LEFT, padx=5) self.
+
+protocol("WM_DELETE_WINDOW", self.
+
+cancel_pin_entry) self.
+
+bind("<KeyPress>", self.
+
+handle_keypress) def handle_keypress(self, event): key = event.
+
+keysym if key.
+
+isdigit(): self.
+
+add_to_pin(key) elif key == "BackSpace": self.
+
+add_to_pin("BORRAR") elif key == "Return": self.
+
+submit_pin() elif key == "Escape": self.
+
+cancel_pin_entry() def add_to_pin(self, char): if char == "BORRAR": self.
+
+pin = self.
+
+pin[:-1] elif len(self.
+
+pin) < 4: self.
+
+pin += char self.
+
+label_display.
+
+config(text="*" * len(self.
+
+pin)) def submit_pin(self, event=None): if len(self.
+
+pin) == 4: self.
+
+master.
+
+check_pin(self.
+
+user, self.
+
+pin, self) else: self.
+
+label_pin.
+
+config(text="Error por favor ingrese nuevamente", fg="red") self.
+
+pin = "" self.
+
+label_display.
+
+config(text="") def cancel_pin_entry(self, event=None): self.
+
+destroy() def show_error_message(self, message): self.
+
+error_message.
+
+config(text=message) self.
+
+pin = "" self.
+
+label_display.
+
+config(text="") class ProductEntryWindow(tk.
+
+Toplevel): def __init__(self, master): super().
+
+__init__(master) self.
+
+master = master self.
+
+title("Ingresar variedad de papa") self.
+
+geometry("1440x1050") self.
+
+product_code = "" self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="ELIJA LA VARIEDAD DE PAPA", font=("Helvetica", 32, "bold")) self.
+
+label_instruction.
+
+pack(pady=5) self.
+
+button_frame = tk.
+
+Frame(self) self.
+
+button_frame.
+
+pack(pady=10) self.
+
+create_product_button("FIANNAS", self.
+
+set_product_code_1, "lightgreen") self.
+
+create_product_button("ATLANTICS", self.
+
+set_product_code_2, "lightblue") self.
+
+create_product_button("ORQUESTAS", self.
+
+set_product_code_3, "lightcoral") def create_product_button(self, text, command, color): button = tk.
+
+Button(self.
+
+button_frame, text=text, font=("Helvetica", 38, "bold"), width=14, height=8, command=command, bg=color) button.
+
+pack(side=tk.
+
+LEFT, padx=10, pady=10) def set_product_code_1(self): self.
+
+master.
+
+open_size_selection_window("FIANNAS") self.
+
+destroy() def set_product_code_2(self): self.
+
+master.
+
+open_size_selection_window("ATLANTICS") self.
+
+destroy() def set_product_code_3(self): self.
+
+master.
+
+open_size_selection_window("ORQUESTAS") self.
+
+destroy() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class SizeSelectionWindow(tk.
+
+Toplevel): def __init__(self, master, product_code): super().
+
+__init__(master) self.
+
+master = master self.
+
+product_code = product_code self.
+
+title("Seleccionar Tamaño de Papa") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="SELECCIONE TAMAÑO DE PAPA", font=("Helvetica", 34, "bold")) self.
+
+label_instruction.
+
+pack(pady=20) self.
+
+size_frame = tk.
+
+Frame(self) self.
+
+size_frame.
+
+pack(pady=20) sizes = [("1era", "1"), ("2nda", "2"), ("3era", "3"), ("4ta", "4"), ("5ta", "5"), ("R", "R")] colors = ["lightblue", "lightgreen", "lightcoral", "lightgoldenrodyellow", "lightpink", "lightcyan"] for i, (size_text, size_value) in enumerate(sizes): button = tk.
+
+Button(self.
+
+size_frame, text=size_text, font=("Helvetica", 36, "bold"), width=10, height=4, bg=colors[i], command=lambda size_value=size_value: self.
+
+select_size(size_value)) button.
+
+grid(row=i//3, column=i%3, padx=10, pady=10) back_button = tk.
+
+Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.
+
+back_to_product_entry) back_button.
+
+pack(pady=20) def select_size(self, size): self.
+
+master.
+
+open_trip_code_window(self.
+
+product_code, size) self.
+
+destroy() def back_to_product_entry(self): self.
+
+destroy() self.
+
+master.
+
+open_product_entry_window() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class TripCodeWindow(tk.
+
+Toplevel): def __init__(self, master, product_code, size): super().
+
+__init__(master) self.
+
+master = master self.
+
+product_code = product_code self.
+
+size = size self.
+
+title("Ingresar Clave de Viaje") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="INGRESE CLAVE DE VIAJE ", font=("Helvetica", 30, "bold")) self.
+
+label_instruction.
+
+pack(pady=15) self.
+
+entry_trip_code = tk.
+
+Entry(self, font=("Helvetica", 30)) self.
+
+entry_trip_code.
+
+pack(pady=10) self.
+
+entry_trip_code.
+
+focus_set() self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=20) keys = [ ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "/"], ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "-"], ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Z", ".
+
+"], ["X", "C", "V", "B", "N", "M"], ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=4, height=2, command=lambda key=key: self.
+
+add_to_entry(key), bg="darkgrey") button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) backspace_button = tk.
+
+Button(key_frame, text="BORRAR", font=("Helvetica", 24, "bold"), width=8, height=2, command=self.
+
+delete_last_char, bg="darkgrey") backspace_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) space_button = tk.
+
+Button(key_frame, text="ESPACIO", font=("Helvetica", 24, "bold"), width=8, height=2, command=lambda: self.
+
+add_to_entry(" "), bg="darkgrey") space_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) enter_button = tk.
+
+Button(key_frame, text="ENTER", font=("Helvetica", 30, "bold"), width=6, height=3, command=self.
+
+submit_trip_code, bg="lightgreen") enter_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) back_button = tk.
+
+Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.
+
+back_to_size_selection) back_button.
+
+pack(pady=5) self.
+
+bind("<Return>", self.
+
+submit_trip_code) def add_to_entry(self, char): current_text = self.
+
+entry_trip_code.
+
+get() self.
+
+entry_trip_code.
+
+delete(0, tk.
+
+END) self.
+
+entry_trip_code.
+
+insert(tk.
+
+END, current_text + char) def delete_last_char(self): current_text = self.
+
+entry_trip_code.
+
+get() self.
+
+entry_trip_code.
+
+delete(len(current_text) - 1) def submit_trip_code(self, event=None): trip_code = self.
+
+entry_trip_code.
+
+get().
+
+strip() if trip_code: self.
+
+master.
+
+open_price_per_kg_window(self.
+
+product_code, self.
+
+size, trip_code) self.
+
+destroy() else: self.
+
+label_instruction.
+
+config(text="Por favor ingrese la clave de viaje", fg="red") def back_to_size_selection(self): self.
+
+destroy() self.
+
+master.
+
+open_size_selection_window(self.
+
+product_code) def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class PricePerKgWindow(tk.
+
+Toplevel): def __init__(self, master, product_code, size, trip_code): super().
+
+__init__(master) self.
+
+master = master self.
+
+product_code = product_code self.
+
+size = size self.
+
+trip_code = trip_code self.
+
+title("Ingresar Precio por Kilo") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="INGRESE EL PRECIO POR KILO ", font=("Helvetica", 36, "bold")) self.
+
+label_instruction.
+
+pack(pady=5) self.
+
+entry_price_per_kg = tk.
+
+Entry(self, font=("Helvetica", 32, "bold")) self.
+
+entry_price_per_kg.
+
+pack(pady=10) self.
+
+entry_price_per_kg.
+
+focus_set() self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=10) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], [".
+
+", "0", "BORRAR"], ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=6, height=2, command=lambda key=key: self.
+
+add_to_entry(key)) button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) button_frame = tk.
+
+Frame(self) button_frame.
+
+pack(pady=5) cancel_button = tk.
+
+Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=3, command=self.
+
+cancel_price_entry, bg="lightcoral", fg="black") cancel_button.
+
+pack(side=tk.
+
+LEFT, padx=5) accept_button = tk.
+
+Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=3, command=self.
+
+submit_price, bg="lightgreen", fg="black") accept_button.
+
+pack(side=tk.
+
+LEFT, padx=5) self.
+
+protocol("WM_DELETE_WINDOW", self.
+
+cancel_price_entry) self.
+
+bind("<KeyPress>", self.
+
+handle_keypress) def handle_keypress(self, event): key = event.
+
+keysym if key.
+
+isdigit() or key == "period": self.
+
+add_to_entry(key) elif key == "BackSpace": self.
+
+add_to_entry("BORRAR") elif key == "Return": self.
+
+submit_price() elif key == "Escape": self.
+
+cancel_price_entry() def add_to_entry(self, char): if char == "BORRAR": current_text = self.
+
+entry_price_per_kg.
+
+get() self.
+
+entry_price_per_kg.
+
+delete(len(current_text) - 1) elif len(char) == 1 or char == "period": current_text = self.
+
+entry_price_per_kg.
+
+get() self.
+
+entry_price_per_kg.
+
+delete(0, tk.
+
+END) self.
+
+entry_price_per_kg.
+
+insert(tk.
+
+END, current_text + ('.
+
+' if char == "period" else char)) def submit_price(self, event=None): price_per_kg = self.
+
+entry_price_per_kg.
+
+get().
+
+strip() if price_per_kg: self.
+
+master.
+
+open_num_arpillas_window(self.
+
+product_code, self.
+
+size, self.
+
+trip_code, float(price_per_kg)) self.
+
+destroy() else: self.
+
+label_instruction.
+
+config(text="Por favor ingrese el precio por kilo", fg="red") def cancel_price_entry(self, event=None): self.
+
+master.
+
+open_trip_code_window(self.
+
+product_code, self.
+
+size, self.
+
+trip_code) self.
+
+destroy() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class NumArpillasWindow(tk.
+
+Toplevel): def __init__(self, master, product_code, size, trip_code, price_per_kg): super().
+
+__init__(master) self.
+
+master = master self.
+
+product_code = product_code self.
+
+size = size self.
+
+trip_code = trip_code self.
+
+price_per_kg = price_per_kg self.
+
+title("Ingresar Número de Arpillas") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="INGRESE NUMERO DE ARPILLAS ", font=("Helvetica", 36, "bold")) self.
+
+label_instruction.
+
+pack(pady=10) self.
+
+entry_num_arpillas = tk.
+
+Entry(self, font=("Helvetica", 34)) self.
+
+entry_num_arpillas.
+
+pack(pady=10) self.
+
+entry_num_arpillas.
+
+focus_set() self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=20) keys = [ ["1", "2", "3", "1/4","1/5"], ["4", "5", "6", "1/2","1/10"], ["7", "8", "9", "3/4", "OTRO"], ["0", "BORRAR"] ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 26, "bold"), width=6, height=2, command=lambda key=key: self.
+
+add_to_entry(key)) button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) button_frame = tk.
+
+Frame(self) button_frame.
+
+pack(pady=5) cancel_button = tk.
+
+Button(button_frame, text="CANCELAR", font=("Helvetica", 26, "bold"), width=9, height=3, command=self.
+
+cancel_num_arpillas_entry, bg="lightcoral", fg="black") cancel_button.
+
+pack(side=tk.
+
+LEFT, padx=5) accept_button = tk.
+
+Button(button_frame, text="ACEPTAR", font=("Helvetica", 26, "bold"), width=9, height=3, command=self.
+
+submit_num_arpillas, bg="lightgreen", fg="black") accept_button.
+
+pack(side=tk.
+
+LEFT, padx=5) self.
+
+protocol("WM_DELETE_WINDOW", self.
+
+cancel_num_arpillas_entry) self.
+
+bind("<KeyPress>", self.
+
+handle_keypress) def handle_keypress(self, event): key = event.
+
+keysym if key.
+
+isdigit(): self.
+
+add_to_entry(key) elif key == "BackSpace": self.
+
+add_to_entry("BORRAR") elif key == "Return": self.
+
+submit_num_arpillas() elif key == "Escape": self.
+
+cancel_num_arpillas_entry() def add_to_entry(self, char): current_text = self.
+
+entry_num_arpillas.
+
+get() if char == "BORRAR": self.
+
+entry_num_arpillas.
+
+delete(0, tk.
+
+END) self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, current_text[:-1]) elif char in ["1/10","1/5","1/4", "1/2", "3/4"]: if current_text == "": if char == "1/4": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, "0.
+
+25") elif char == "1/2": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, "0.
+
+5") elif char == "3/4": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, "0.
+
+75") elif char == "1/10": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, "0.
+
+1") elif char == "1/5": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, "0.
+
+2") else: if char == "1/4": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, ".
+
+25") elif char == "1/2": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, ".
+
+5") elif char == "3/4": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, ".
+
+75") elif char == "1/10": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, ".
+
+1") elif char == "1/5": self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, ".
+
+2") else: self.
+
+entry_num_arpillas.
+
+insert(tk.
+
+END, char) def submit_num_arpillas(self, event=None): num_arpillas = self.
+
+entry_num_arpillas.
+
+get().
+
+strip() if num_arpillas: self.
+
+master.
+
+open_weighing_stage_window(self.
+
+product_code, self.
+
+size, self.
+
+trip_code, self.
+
+price_per_kg, num_arpillas) self.
+
+destroy() else: self.
+
+label_instruction.
+
+config(text="POR FAVOR INGRESE NUMERO DE ARPILLAS", fg="red") def cancel_num_arpillas_entry(self, event=None): self.
+
+master.
+
+open_price_per_kg_window(self.
+
+product_code, self.
+
+size, self.
+
+trip_code) self.
+
+destroy() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class WeighingStageWindow(tk.
+
+Toplevel): def __init__(self, master, product_code, size, trip_code, price_per_kg, num_arpillas, serial_port): super().
+
+__init__(master) self.
+
+master = master self.
+
+product_code = product_code self.
+
+size = size self.
+
+trip_code = trip_code self.
+
+price_per_kg = price_per_kg self.
+
+num_arpillas = num_arpillas self.
+
+serial_port = serial_port self.
+
+current_weight = 0 # Inicializamos current_weight self.
+
+title("Etapa de Pesaje") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 20)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text=f"COLOQUE EN LA BASCULA PAPAS {self.
+
+product_code} A PESAR", font=("Helvetica", 32, "bold")) self.
+
+label_instruction.
+
+pack(pady=20) self.
+
+label_price = tk.
+
+Label(self, text=f"PRECIO POR KILO: ${self.
+
+price_per_kg:.
+
+2f}", font=("Helvetica", 30, "bold")) self.
+
+label_price.
+
+pack(pady=20) self.
+
+label_weight = tk.
+
+Label(self, text="PESO: 0.
+
+00 kg", font=("Helvetica", 30)) self.
+
+label_weight.
+
+pack(pady=20) self.
+
+label_total_price = tk.
+
+Label(self, text="PRECIO TOTAL: $0.
+
+00", font=("Helvetica", 30)) self.
+
+label_total_price.
+
+pack(pady=10) # Botones Volver y Aceptar self.
+
+button_frame = tk.
+
+Frame(self) self.
+
+button_frame.
+
+pack(pady=10) self.
+
+button_back = tk.
+
+Button(self.
+
+button_frame, text="VOLVER", font=("Helvetica", 32, "bold"),width=20, height=10, bg="lightcoral", command=self.
+
+back_to_product_entry) self.
+
+button_back.
+
+pack(side=tk.
+
+LEFT, padx=10) self.
+
+button_accept = tk.
+
+Button(self.
+
+button_frame, text="ACEPTAR", font=("Helvetica", 32, "bold"),width=20, height=10, bg="lightgreen", command=self.
+
+finish_purchase) self.
+
+button_accept.
+
+pack(side=tk.
+
+LEFT, padx=10) self.
+
+add_another_frame = tk.
+
+Frame(self) self.
+
+add_another_frame.
+
+pack_forget() # Oculta el frame inicialmente self.
+
+start_weighing() def back_to_product_entry(self): self.
+
+destroy() self.
+
+master.
+
+open_product_entry_window() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) def start_weighing(self): self.
+
+read_weight() def read_weight(self): if self.
+
+serial_port is not None: self.
+
+serial_port.
+
+write(b'P') # Enviar el carácter 'P' a la báscula time.
+
+sleep(0.
+
+1) # Pequeña pausa para esperar la respuesta # Se lee todo lo disponible en el buffer del puerto serie weight_data = self.
+
+serial_port.
+
+read(self.
+
+serial_port.
+
+in_waiting).
+
+decode('utf-8').
+
+strip() # Filtra y procesa cada número flotante encontrado weights = re.
+
+findall(r'\d+\.
+
+\d+', weight_data) if weights: try: # Toma el último peso válido recibido self.
+
+current_weight = float(weights[-1]) self.
+
+label_weight.
+
+config(text=f"PESO: {self.
+
+current_weight:.
+
+1f} kg") self.
+
+label_total_price.
+
+config(text=f"PRECIO TOTAL: ${self.
+
+current_weight * self.
+
+price_per_kg:.
+
+2f}") except ValueError: pass # Si no es un número, no actualiza nada self.
+
+after(20, self.
+
+read_weight) # Repetir el proceso cada 50 ms def ask_add_another_product(self): self.
+
+add_another_frame = tk.
+
+Frame(self) self.
+
+add_another_frame.
+
+pack(pady=20) self.
+
+button_no = tk.
+
+Button(self.
+
+add_another_frame, text="CONTINUAR", font=("Helvetica", 36, "bold"), bg="lightgreen", command=self.
+
+finish_purchase, width=16, height=4) self.
+
+button_no.
+
+pack(side=tk.
+
+LEFT, padx=20) def finish_purchase(self): self.
+
+master.
+
+add_to_cart(self.
+
+product_code, self.
+
+size, self.
+
+trip_code, self.
+
+current_weight, self.
+
+price_per_kg, self.
+
+num_arpillas) self.
+
+add_another_frame.
+
+destroy() self.
+
+destroy() self.
+
+master.
+
+show_checkout() class CheckoutWindow(tk.
+
+Toplevel): def __init__(self, master, cart, product_code, size, trip_code, price_per_kg, num_arpillas): super().
+
+__init__(master) self.
+
+master = master self.
+
+title("Resumen de Compra") self.
+
+geometry("1440x1050") self.
+
+cart = cart[0] # Solo un producto en el carrito self.
+
+payment_method = "" self.
+
+current_ticket = 1 self.
+
+sale_number = master.
+
+increment_sale_number() self.
+
+product_code = product_code self.
+
+size = size self.
+
+trip_code = trip_code self.
+
+price_per_kg = price_per_kg self.
+
+num_arpillas = num_arpillas self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 20)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_title = tk.
+
+Label(self, text="RESUMEN DE LA COMPRA", font=("Helvetica", 36, "bold")) self.
+
+label_title.
+
+pack(pady=20) product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart subtotal = weight * price_per_kg self.
+
+total_price = subtotal self.
+
+label_details = tk.
+
+Label( self, text=f"Producto: {product_code}\nTamaño: {size}\nClave de viaje: {trip_code}\nPeso: {weight:.
+
+1f} kg\nPrecio por kg: ${price_per_kg:.
+
+2f}\nNúmero de arpillas: {num_arpillas}\nSubtotal: ${subtotal:.
+
+2f}", font=("Helvetica", 26) ) self.
+
+label_details.
+
+pack(pady=20) self.
+
+label_total = tk.
+
+Label(self, text=f"TOTAL A PAGAR: ${self.
+
+total_price:.
+
+2f}", font=("Helvetica", 32, "bold")) self.
+
+label_total.
+
+pack(pady=10) self.
+
+button_frame = tk.
+
+Frame(self) self.
+
+button_frame.
+
+pack(pady=10) back_button = tk.
+
+Button(self.
+
+button_frame, text="VOLVER", font=("Helvetica", 34, "bold"),width=10,height=4, bg="lightblue", command=self.
+
+back_to_weighing) back_button.
+
+pack(side=tk.
+
+LEFT, padx=10) cancel_button = tk.
+
+Button(self.
+
+button_frame, text="CANCELAR", font=("Helvetica", 34, "bold"),width=10,height=4, bg="lightcoral", command=self.
+
+cancel_purchase) cancel_button.
+
+pack(side=tk.
+
+LEFT, padx=10) cash_button = tk.
+
+Button(self.
+
+button_frame, text="EFECTIVO", font=("Helvetica", 34, "bold"), bg="lightgreen",width=10,height=4, command=lambda: self.
+
+set_payment_method("Efectivo")) cash_button.
+
+pack(side=tk.
+
+LEFT, padx=10) credit_button = tk.
+
+Button(self.
+
+button_frame, text="FIADO", font=("Helvetica", 34, "bold"), bg="lightyellow",width=10,height=4, command=lambda: self.
+
+open_client_name_window()) credit_button.
+
+pack(side=tk.
+
+LEFT, padx=10) def back_to_weighing(self): self.
+
+destroy() self.
+
+master.
+
+open_weighing_stage_window(self.
+
+product_code, self.
+
+size, self.
+
+trip_code, self.
+
+price_per_kg, self.
+
+num_arpillas) def set_payment_method(self, method): self.
+
+payment_method = method self.
+
+label_total.
+
+config(text=f"Total de la Compra: ${self.
+
+total_price:.
+
+2f}\nMétodo de pago: {self.
+
+payment_method}") self.
+
+button_frame.
+
+pack_forget() self.
+
+print_button = tk.
+
+Button(self, text="IMPRIMIR TICKET CLIENTE", font=("Helvetica", 40, "bold"), width=25, height=3, bg="lightgreen", command=self.
+
+print_ticket) self.
+
+print_button.
+
+pack(pady=20) def open_client_name_window(self): self.
+
+client_name_window = ClientNameWindow(self) def set_client_name(self, client_name): self.
+
+client_name = client_name self.
+
+client_name_window.
+
+destroy() self.
+
+set_payment_method("Fiado") def print_ticket(self): current_time = datetime.
+
+now().
+
+strftime("%d/%m/%Y %H:%M:%S") seller = self.
+
+master.
+
+current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.
+
+00, dsrdtr=True) p.
+
+text("-------------------------------\n") p.
+
+text("-------------------------------\n") p.
+
+set(align="center", width=2, height=2, density=3) p.
+
+text(" Papas El Campeon \n") p.
+
+set(align="left", width=1, height=1, density=2) p.
+
+text(f" Fecha: {current_time}\n") p.
+
+text(f"Folio: {self.
+
+sale_number}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Peso(kg) Subtotal\n") p.
+
+text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart subtotal = weight * price_per_kg p.
+
+text(f"{weight:.
+
+1f} ${subtotal:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"Total: ${self.
+
+total_price:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Gracias por su compra\nVuelva pronto\n") p.
+
+cut() if self.
+
+current_ticket == 1: self.
+
+current_ticket += 1 self.
+
+print_button.
+
+config(text="TICKET VENDEDOR", command=self.
+
+print_seller_ticket) else: self.
+
+print_button.
+
+config(state=tk.
+
+DISABLED) self.
+
+show_new_sale_prompt() def print_seller_ticket(self): current_time = datetime.
+
+now().
+
+strftime("%d/%m/%Y %H:%M:%S") seller = self.
+
+master.
+
+current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.
+
+00, dsrdtr=True) p.
+
+text("-------------------------------\n") p.
+
+text("-------------------------------\n") p.
+
+set(align="center", width=2, height=2, density=3) p.
+
+text(" Papas El Campeon \n") p.
+
+set(align="left", width=1, height=1, density=2) p.
+
+text(f" Fecha: {current_time}\n") p.
+
+text(f"Folio: {self.
+
+sale_number}\n") p.
+
+text(f"Vendedor: {seller}\n") if hasattr(self, 'client_name'): p.
+
+text("FIADO\n") p.
+
+text(f"Cliente: {self.
+
+client_name}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Producto-T NA CV P kg Subtotal\n") p.
+
+text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart subtotal = weight * price_per_kg p.
+
+text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.
+
+1f}kg\n") p.
+
+text(f"${subtotal:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"Total: ${self.
+
+total_price:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Entregue ticket a contabilidad.
+
+\n") qr_content = f"{seller}\n{self.
+
+total_price:.
+
+2f}" p.
+
+qr(qr_content, size=8) p.
+
+text("-------------------------------\n") p.
+
+cut() self.
+
+master.
+
+stop_video_recording() # Detener grabación después de imprimir el ticket de vendedor self.
+
+save_sale_data_to_spreadsheet("NO") def cancel_purchase(self): CancelPinEntryWindow(self) def cancel_purchase_confirmed(self): current_time = datetime.
+
+now().
+
+strftime("%d/%m/%Y %H:%M:%S") seller = self.
+
+master.
+
+current_user p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.
+
+00, dsrdtr=True) p.
+
+text("-------------------------------\n") p.
+
+text("-------------------------------\n") p.
+
+set(align="center", width=2, height=2, density=3) p.
+
+text(" Papas El Campeon \n") p.
+
+set(align="left", width=1, height=1, density=2) p.
+
+text(f" Fecha: {current_time}\n") p.
+
+text(f"Folio: {self.
+
+sale_number}\n") p.
+
+text(f"Vendedor: {seller}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Producto-T NA CV P kg Subtotal\n") p.
+
+text("-------------------------------\n") product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart subtotal = weight * price_per_kg p.
+
+text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.
+
+1f}kg\n") p.
+
+text(f"${subtotal:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"Total: ${self.
+
+total_price:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text("La compra fue cancelada\n") p.
+
+text("-------------------------------\n") p.
+
+cut() self.
+
+master.
+
+stop_video_recording() # Detener grabación después de imprimir el ticket de venta cancelada self.
+
+save_sale_data_to_spreadsheet("SI") def save_sale_data_to_spreadsheet(self, cancelado): product_code, size, trip_code, weight, price_per_kg, num_arpillas = self.
+
+cart subtotal = weight * price_per_kg sale_data = [[ self.
+
+sale_number, # NUMERO DE VENTA (O FOLIO) datetime.
+
+now().
+
+strftime("%d/%m/%Y"), # FECHA datetime.
+
+now().
+
+strftime("%H:%M:%S"), # HORA self.
+
+master.
+
+current_user, # VENDEDOR product_code, # CLAVE DE PRODUCTO size, # TAMAÑO num_arpillas, # NUMERO DE ARPILLAS trip_code, # CLAVE DE VIAJE weight, # PESO EN KG price_per_kg, # PRECIO POR KILO subtotal, # COSTO SUBTOTAL "SI" if hasattr(self, 'client_name') else "NO", # ¿FIADO?
+
+self.
+
+client_name if hasattr(self, 'client_name') else "N/A", # NOMBRE DE CLIENTE cancelado # ¿CANCELADO?
+
+]] self.
+
+master.
+
+save_sale_data(sale_data) self.
+
+show_new_sale_prompt() def show_new_sale_prompt(self): NewSalePromptWindow(self.
+
+master, self) def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class CancelPinEntryWindow(tk.
+
+Toplevel): def __init__(self, master): super().
+
+__init__(master) self.
+
+master = master self.
+
+title("Ingrese PIN de Cancelación") self.
+
+geometry("650x800") self.
+
+pin = "" # Centrando la ventana emergente self.
+
+update_idletasks() width = self.
+
+winfo_width() height = self.
+
+winfo_height() x = (self.
+
+winfo_screenwidth() // 2) - (width // 2) y = (self.
+
+winfo_screenheight() // 2) - (height // 2) self.
+
+geometry(f'{width}x{height}+{x}+{y}') self.
+
+label_pin = tk.
+
+Label(self, text="INGRESE PIN DE CANCELACIÓN:", font=("Helvetica", 25, "bold")) self.
+
+label_pin.
+
+pack(pady=10) self.
+
+label_display = tk.
+
+Label(self, text="", font=("Helvetica", 25, "bold")) self.
+
+label_display.
+
+pack() self.
+
+error_message = tk.
+
+Label(self, text="", font=("Helvetica", 16), fg="red") self.
+
+error_message.
+
+pack(pady=5) self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=20) keys = [ ["1", "2", "3"], ["4", "5", "6"], ["7", "8", "9"], ["", "0", "BORRAR"], ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: if key !
+
+= "": button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 22, "bold"), width=7, height=3, command=lambda key=key: self.
+
+add_to_pin(key)) else: button = tk.
+
+Button(key_frame, text="", font=("Helvetica", 22), width=6, height=3, state=tk.
+
+DISABLED) button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) button_frame = tk.
+
+Frame(self) button_frame.
+
+pack(pady=10) cancel_button = tk.
+
+Button(button_frame, text="CANCELAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.
+
+cancel_pin_entry, bg="lightcoral", fg="black") cancel_button.
+
+pack(side=tk.
+
+LEFT, padx=5) accept_button = tk.
+
+Button(button_frame, text="ACEPTAR", font=("Helvetica", 28, "bold"), width=10, height=4, command=self.
+
+submit_pin, bg="lightgreen", fg="black") accept_button.
+
+pack(side=tk.
+
+LEFT, padx=5) self.
+
+protocol("WM_DELETE_WINDOW", self.
+
+cancel_pin_entry) self.
+
+bind("<KeyPress>", self.
+
+handle_keypress) def handle_keypress(self, event): key = event.
+
+keysym if key.
+
+isdigit(): self.
+
+add_to_pin(key) elif key == "BackSpace": self.
+
+add_to_pin("BORRAR") elif key == "Return": self.
+
+submit_pin() elif key == "Escape": self.
+
+cancel_pin_entry() def add_to_pin(self, char): if char == "BORRAR": self.
+
+pin = self.
+
+pin[:-1] elif len(self.
+
+pin) < 6: self.
+
+pin += char self.
+
+label_display.
+
+config(text="*" * len(self.
+
+pin)) def submit_pin(self, event=None): if self.
+
+pin == "083145": self.
+
+master.
+
+cancel_purchase_confirmed() self.
+
+destroy() else: self.
+
+error_message.
+
+config(text="PIN INCORRECTO.
+
+INTENTE DE NUEVO.
+
+") self.
+
+pin = "" self.
+
+label_display.
+
+config(text="") def cancel_pin_entry(self, event=None): self.
+
+destroy() class ClientNameWindow(tk.
+
+Toplevel): def __init__(self, master): super().
+
+__init__(master) self.
+
+master = master self.
+
+title("Nombre de Cliente") self.
+
+geometry("1440x1050") self.
+
+label_date_time = tk.
+
+Label(self, text="", font=("Helvetica", 22)) self.
+
+label_date_time.
+
+pack(side=tk.
+
+TOP, anchor=tk.
+
+NW, padx=10, pady=10) self.
+
+update_datetime() self.
+
+label_instruction = tk.
+
+Label(self, text="INGRESE NOMBRE DE CLIENTE ", font=("Helvetica", 32, "bold")) self.
+
+label_instruction.
+
+pack(pady=10) self.
+
+entry_client_name = tk.
+
+Entry(self, font=("Helvetica", 30)) self.
+
+entry_client_name.
+
+pack(pady=10) self.
+
+entry_client_name.
+
+focus_set() self.
+
+keyboard_frame = tk.
+
+Frame(self) self.
+
+keyboard_frame.
+
+pack(pady=10) keys = [ ["1", "2", "3", "4", "5", "6", "7", "8", "9", "0", "/"], ["Q", "W", "E", "R", "T", "Y", "U", "I", "O", "P", "-"], ["A", "S", "D", "F", "G", "H", "J", "K", "L", "Z", ".
+
+"], ["X", "C", "V", "B", "N", "M"], ] for row in keys: key_frame = tk.
+
+Frame(self.
+
+keyboard_frame) key_frame.
+
+pack() for key in row: button = tk.
+
+Button(key_frame, text=key, font=("Helvetica", 24, "bold"), width=4, height=2, command=lambda key=key: self.
+
+add_to_entry(key), bg="darkgrey") button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) backspace_button = tk.
+
+Button(key_frame, text="BORRAR", font=("Helvetica", 24, "bold"), width=6, height=2, command=self.
+
+delete_last_char, bg="darkgrey") backspace_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) space_button = tk.
+
+Button(key_frame, text="ESPACIO", font=("Helvetica", 24, "bold"), width=6, height=2, command=lambda: self.
+
+add_to_entry(" "), bg="darkgrey") space_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) enter_button = tk.
+
+Button(key_frame, text="ENTER", font=("Helvetica", 30, "bold"), width=8, height=3, command=self.
+
+submit_client_name, bg="lightgreen") enter_button.
+
+pack(side=tk.
+
+LEFT, padx=5, pady=5) back_button = tk.
+
+Button(self, text="VOLVER", font=("Helvetica", 30, "bold"), bg="lightcoral", command=self.
+
+back_to_checkout) back_button.
+
+pack(pady=5) self.
+
+bind("<Return>", self.
+
+submit_client_name) def add_to_entry(self, char): current_text = self.
+
+entry_client_name.
+
+get() self.
+
+entry_client_name.
+
+delete(0, tk.
+
+END) self.
+
+entry_client_name.
+
+insert(tk.
+
+END, current_text + char) def delete_last_char(self): current_text = self.
+
+entry_client_name.
+
+get() self.
+
+entry_client_name.
+
+delete(len(current_text) - 1) def submit_client_name(self, event=None): client_name = self.
+
+entry_client_name.
+
+get().
+
+strip() if client_name: self.
+
+master.
+
+set_client_name(client_name) else: self.
+
+label_instruction.
+
+config(text="Por favor ingrese el nombre del cliente", fg="red") def back_to_checkout(self): self.
+
+destroy() def update_datetime(self): now = datetime.
+
+now() formatted_date_time = now.
+
+strftime("%d/%m/%Y %I:%M:%S %p") self.
+
+label_date_time.
+
+config(text=formatted_date_time) self.
+
+after(1000, self.
+
+update_datetime) class NewSalePromptWindow(tk.
+
+Toplevel): def __init__(self, master, checkout_window, weighing_window=None): super().
+
+__init__(master) self.
+
+master = master self.
+
+checkout_window = checkout_window self.
+
+weighing_window = weighing_window # Añadir referencia de la ventana de "Etapa de Pesaje" self.
+
+title("¿Nueva venta?
+
+") self.
+
+geometry("1440x1050") self.
+
+master.
+
+stop_video_recording() self.
+
+label_question = tk.
+
+Label(self, text="¿DESEA INICIAR UNA NUEVA VENTA?
+
+", font=("Helvetica", 40, "bold")) self.
+
+label_question.
+
+pack(pady=20) self.
+
+label_reticket = tk.
+
+Label(self, text="EN CASO DE ATASCO DE PAPEL ABRA LA IMPRESORA \n COLOQUE BIEN EL PAPEL Y REIMPRIMA TICKETS\n", font=("Helvetica", 34, "bold")) self.
+
+label_reticket.
+
+pack(pady=20) self.
+
+new_sale_frame = tk.
+
+Frame(self) self.
+
+new_sale_frame.
+
+pack(pady=40) self.
+
+button_reprint_tickets = tk.
+
+Button(self.
+
+new_sale_frame, text="REIMPRIMIR", font=("Helvetica", 46, "bold"), width=20, height=10, bg="lightblue", command=self.
+
+reprint_tickets) self.
+
+button_reprint_tickets.
+
+pack(side=tk.
+
+LEFT, padx=20) self.
+
+button_new_sale_yes = tk.
+
+Button(self.
+
+new_sale_frame, text="NUEVA VENTA", font=("Helvetica", 46, "bold"),width=20, height=10, bg="lightgreen", command=self.
+
+new_sale_yes) self.
+
+button_new_sale_yes.
+
+pack(side=tk.
+
+LEFT, padx=20) def new_sale_yes(self): self.
+
+master.
+
+cart = [] # Limpiar el resumen de compra self.
+
+checkout_window.
+
+destroy() self.
+
+destroy() self.
+
+master.
+
+reset_to_login() def reprint_tickets(self): current_time = datetime.
+
+now().
+
+strftime("%d/%m/%Y %H:%M:%S") seller = self.
+
+master.
+
+current_user # Obteniendo los datos del carrito desde la instancia principal cart = self.
+
+master.
+
+cart if not cart: print("Error: Carrito vacío.
+
+") return product_code, size, trip_code, weight, price_per_kg, num_arpillas = cart[0] subtotal = weight * price_per_kg total_price = subtotal p = Serial(devfile='/dev/serial0', baudrate=115200, bytesize=8, parity='N', stopbits=1, timeout=1.
+
+00, dsrdtr=True) # Ticket de Cliente p.
+
+text("-------------------------------\n") p.
+
+text("-------------------------------\n") p.
+
+set(align="center", width=2, height=2, density=3) p.
+
+text(" Papas El Campeon \n") p.
+
+set(align="left", width=1, height=1, density=2) p.
+
+text(f" Fecha: {current_time}\n") p.
+
+text(f"Folio: {self.
+
+master.
+
+sale_number}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Peso(kg) Subtotal\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"{weight:.
+
+1f} ${subtotal:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"Total: ${total_price:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Gracias por su compra\nVuelva pronto\n") p.
+
+cut() time.
+
+sleep(3) # Ticket de Vendedor p.
+
+text("-------------------------------\n") p.
+
+text("-------------------------------\n") p.
+
+set(align="center", width=2, height=2, density=3) p.
+
+text(" Papas El Campeon \n") p.
+
+text(" COPIA DE TICKET VENDEDOR \n") p.
+
+text(" Hubo atasco de papel\n") p.
+
+set(align="left", width=1, height=1, density=2) p.
+
+text(f" Fecha: {current_time}\n") p.
+
+text(f"Folio: {self.
+
+master.
+
+sale_number}\n") p.
+
+text(f"Vendedor: {seller}\n") if hasattr(self.
+
+master, 'client_name'): p.
+
+text("FIADO\n") p.
+
+text(f"Cliente: {self.
+
+master.
+
+client_name}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Producto-T NA CV P kg Subtotal\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"{product_code}-{size} {num_arpillas} {trip_code} {price_per_kg} {weight:.
+
+1f}kg\n") p.
+
+text(f"${subtotal:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text(f"Total: ${total_price:.
+
+2f}\n") p.
+
+text("-------------------------------\n") p.
+
+text("Entregue ticket a contabilidad.
+
+\n") qr_content = f"{seller}\n{total_price:.
+
+2f}" p.
+
+qr(qr_content, size=8) p.
+
+text("-------------------------------\n") p.
+
+cut() # Cerrar ventana de "Etapa de Pesaje" if self.
+
+weighing_window is not None: self.
+
+weighing_window.
+
+destroy() self.
+
+master.
+
+cart = [] # Limpiar el resumen de compra self.
+
+checkout_window.
+
+destroy() self.
+
+destroy() self.
+
+master.
+
+reset_to_login() if __name__ == "__main__": app = PapasElCampeonApp() app.
+
+mainloop()
